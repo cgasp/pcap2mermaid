@@ -11,7 +11,7 @@ communication flow between IP addresses and includes the information columns as 
 The resulting Mermaid diagram is embedded in an HTML template for visualization.
 
 Usage:
-    python script.py input_pcap_file
+    python3 pcap2mermaid.py input_pcap_file
 
 Args:
     input_pcap_file (str): The input pcap file to process.
@@ -19,7 +19,7 @@ Args:
 
 Example:
     To convert 'input.pcap' to a Mermaid sequence diagram and save it as 'input.pcap.html':
-    python script.py input.pcap
+    python3 pcap2mermaid.py input.pcap
 """
 
 __author__ = "cgasp"
@@ -51,12 +51,56 @@ def run_tshark(input_file):
         '-e', 'frame.number', '-e', 'frame.time', '-e', 'eth.src', '-e', 'eth.dst',
         '-e', 'eth.type', '-e', 'ip.src', '-e', 'ip.dst', '-e', 'tcp.srcport',
         '-e', 'tcp.dstport', '-e', 'udp.srcport', '-e', 'udp.dstport',
-        '-e', 'ip.proto', '-e', '_ws.col.Info'
+        '-e', 'ip.proto', '-e', 'ip.proto', '-e', '_ws.col.Info'
     ]
+    print(" ".join(tshark_command))
     tshark_output = subprocess.check_output(tshark_command)
     return json.loads(tshark_output)
 
 # Function to generate a Mermaid sequence diagram from the JSON data
+
+
+def packet_interpreter(data_dict):
+    # Interpret ip.proto (assuming it's in decimal format)
+    ip_proto_decimal = int(data_dict.get('ip.proto', ['0'])[0])
+    # Convert ip.proto to its corresponding protocol name
+    ip_proto_name = {
+        1: 'ICMP',
+        6: 'TCP',
+        17: 'UDP',
+        # Add more protocol mappings as needed
+    }.get(ip_proto_decimal, f'Unknown ({ip_proto_decimal})')
+
+    # Interpret eth.type (assuming it's in hexadecimal format)
+    eth_type_hex = data_dict.get('eth.type', ['0x0000'])[0]
+    # Convert eth.type to its corresponding protocol name
+    eth_type_name = {
+        '0x0800': 'IPv4',
+        '0x0806': 'ARP',
+        '0x86dd': 'IPv6',  # Handle IPv6
+        # Add more eth.type mappings as needed
+    }.get(eth_type_hex, f'Unknown ({eth_type_hex})')
+
+    # Get source and destination IP addresses
+    src = data_dict.get(
+        'ip.src', data_dict.get('eth.src', 'Unknown'))[0]
+    dst = data_dict.get(
+        'ip.dst', data_dict.get('eth.dst', 'Unknown'))[0]
+
+    # Get source and destination ports if available
+    src_port = data_dict.get('udp.srcport', [''])[
+        0] or data_dict.get('tcp.srcport', [''])[0]
+    dst_port = data_dict.get('udp.dstport', [''])[
+        0] or data_dict.get('tcp.dstport', [''])[0]
+
+    # Format the tuple based on ip.proto and eth.type
+    if ip_proto_name in ('UDP', 'TCP'):
+        net_tuple = f'{src} ->> {dst}: {ip_proto_name} {src_port} > {dst_port}'
+    elif eth_type_name == 'IPv4':
+        net_tuple = f'{src} ->> {dst}: {ip_proto_name} over {eth_type_name}'
+    else:
+        net_tuple = f'{src} ->> {dst}: {ip_proto_name} over {eth_type_name}'
+    return net_tuple, src
 
 
 def generate_mermaid_sequence_diagram(data):
@@ -70,12 +114,25 @@ def generate_mermaid_sequence_diagram(data):
         str: A Mermaid sequence diagram in text format.
     """
     diagram = ['sequenceDiagram']
+    participants = set()  # Initialize a set to store unique participants
+
     for packet in data:
         layers = packet['_source']['layers']
-        ip_src = layers.get('ip.src', [''])[0]
-        ip_dst = layers.get('ip.dst', [''])[0]
+        # ip_src = layers.get('ip.src', [''])[0]
+        # ip_dst = layers.get('ip.dst', [''])[0]
         info = layers.get('_ws.col.Info', [''])[0]
-        diagram.append(f'{ip_src} ->> {ip_dst}: {info}')
+        # diagram.append(f'{ip_src} ->> {ip_dst}: {info}')
+        net_tuple, src = packet_interpreter(layers)
+
+        # Add source IP to participants set
+        participants.add(src)
+
+        diagram.append(f'{net_tuple}: {info}')
+
+    # Add participants to the diagram
+    for participant in participants:
+        diagram.insert(1, f'participant {participant} as {participant}')
+
     return '\n'.join(diagram)
 
 
@@ -120,6 +177,12 @@ def configure_argparse():
     parser = argparse.ArgumentParser(
         description='Convert pcap file to Mermaid sequence diagram')
     parser.add_argument('input_file', help='Input pcap file')
+    parser.add_argument('--html', action='store_true',
+                        help='Generate HTML output')
+    parser.add_argument('--mmd', action='store_true',
+                        help='Generate MMD output')
+    parser.add_argument('--png', action='store_true',
+                        help='Generate PNG output')
     return parser
 
 
@@ -146,12 +209,41 @@ def main():
     # Generate Mermaid sequence diagram
     mermaid_diagram = generate_mermaid_sequence_diagram(tshark_json_output)
 
-    # Print the Mermaid sequence diagram
+    # Print the Mermaid sequence diagram (always)
     print(mermaid_diagram)
 
-    # Write the Mermaid diagram to an HTML file
-    output_html_file = f"{input_pcap_file}.html"
-    write_out_in_mermaidMarkdown(mermaid_diagram, output_html_file)
+    if args.html:
+        # Write the Mermaid diagram to an HTML file
+        output_html_file = f"{input_pcap_file}.html"
+        write_out_in_mermaidMarkdown(mermaid_diagram, output_html_file)
+        print(f"HTML file saved as '{output_html_file}'")
+
+    if args.mmd:
+        # Write the Mermaid diagram to an MMD (Mermaid Markdown) file
+        output_mmd_file = f"{input_pcap_file}.mmd"
+        with open(output_mmd_file, 'w') as f:
+            f.write(mermaid_diagram)
+        print(f"MMD file saved as '{output_mmd_file}'")
+
+    if args.png:
+        # Generate PNG from MMD using 'mmdc' command
+        # Re-use mmd file
+        if args.mmd:
+            mmd_file = f"{input_pcap_file}.mmd"
+        # create temp file
+        else:
+            filepath = os.path.basename(input_pcap_file)
+            mmd_file = f"/dev/shm/{filepath}.mmd"
+            with open(mmd_file, 'w') as f:
+                f.write(mermaid_diagram)
+        output_png_file = f"{mmd_file}.png"
+
+        try:
+            subprocess.run(['mmdc', '-i', mmd_file, '-o',
+                           output_png_file], check=True)
+            print(f"PNG file saved as '{output_png_file}'")
+        except subprocess.CalledProcessError:
+            print("Error: Unable to generate PNG file. Ensure 'mmdc' is installed and available in the system PATH.")
 
 
 if __name__ == '__main__':
